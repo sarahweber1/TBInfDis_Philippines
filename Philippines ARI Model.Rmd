@@ -1,0 +1,591 @@
+---
+title: "Philippines TB Infection-Disease Model"
+subtitle: "Homogeneous protection"
+author: "Sarah Weber, supervised by Bob Horsburgh & Laura White"
+runtime: shiny
+output: html_document
+date: "2024-08-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, include=FALSE}
+library(ggplot2)
+library(reshape)
+library(reshape2)
+library(RColorBrewer)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+library(scales)
+library(dplyr)
+library(data.table)
+library(kableExtra)
+library(forcats)
+library(data.table)
+library(shiny)
+library(scales)
+library(rsconnect)
+options(scipen = 999)
+
+#setwd("~/Users/sarahweber/Documents/Sarah W Personal/Philippines ARI")
+```
+
+## Project Description {.tabset}
+
+### Goal
+To build a stochastic model that predicts future TB disease prevalence from current prevalence, cure proportions and infections in prior years.  
+
+### Hypotheses
+1. That a fixed combination of disease arising from infections > 5 years old and an increasing frequency of disease arising from infections occurring in the 5 previous years can predict incident cases.  
+2. That reinfections of persons with previous infection will account for the majority of disease when disease prevalence is >100/100,000.  
+3. That the probability of progression increases with multiple infections.  
+
+### Research Plan
+We will first create a model of a stable state where a constant number of annual infections and a fixed proportion of cures leads to a stable TB prevalence. We will use the Philippines for this as the average change in prevalence there was only 1% per year. The we will apply the model to a country with decreasing or increasing prevalence to see to what extent the model can reproduce the observed changes in prevalence with the observed proportion of cures.  
+
+1. The first step will be to use our existing ReMoTe model and assuming random mixing to identify the annual rate of TB infection which, when applied to the population structure of the Philippines, results in a prevalence of infection that is similar to the results of the Tupasi study of 1999.  
+2. The second step will be to calibrate our model for progression from infection to disease so that it yields a constant incidence that, after subtracting the average number of cures, yields the stable prevalence that was observed. We may need to use the Ackley model or we may not.  
+3. The third step will be to use the data from the Philippines prevalence survey of 2016 showing different rates of TB in the different subregions to examine whether more TB is generated when the model is composed of defined subunits with differing ARIs. This will involve creating a separate ARI for each subunit and then performing Step 2 for each subregion.  
+4. The fourth step will be to apply the model to a different country, likely Vietnam, where prevalence was changing over time to see the effect of increasing treatment proportion on declines in prevalence. Because ARI decreases as prevalence decreases, the model will need to adjust ARI at each annual iteration. Adjusting the rates of progression from infection to disease may also be required to fit the observed data.  
+
+
+## Identifying ARI with lowest MSE with Tupasi {.tabset}
+TST Prevalence of Infection at age 'a' = 1-(1-ARI)^a  
+ARI = 1-(1-p)^(1/a), where p is the prevalence of infection  
+
+- We investigate a series of ARIs from 0.005 to 0.05 at increments of 0.001.  
+- We take the median age of each age group and calculate the predicted prevalence using the formula above.  
+- For each age group and ARI in sequence, the mean squared error between the predicted prevalence of infection and the prevalence found by Tupasi is calculated. 
+
+### ARI Result
+The ARI with the lowest MSE between Tupasi and predicted prevalence is 0.037.
+
+```{r ari_calc}
+# vector of ARI options   
+ari1 <- seq(0.005, 0.05, 0.001)
+
+# pull median age from each age range - change to Tupasi age medians (use 70 for 70+ because life expectancy in Philippines is only ~71)
+med.age <- c(0.5, 2.5, 7, 12, 17, 24.5, 34.5, 44.5, 54.5, 64.5, 70)
+
+# Tupasi prevalences
+tupasi.p <- c(0.078, 0.066, 0.161, 0.324, 0.508, 0.723, 0.813, 0.863, 0.843, 0.774, 0.693) #same as age.inf.perc
+
+# function to calculate TST prevalence for each ARI in sequence and age 
+calc.prev <- function(ari1, age=med.age) {
+      tst.prev <- 1-((1-ari1)^age)
+      return(tst.prev)
+      }
+
+# vector to store MSEs - should be same length as ARI sequence we made 
+mse <- NULL 
+
+# matrix to store prevalences - age group as rows, ARIs as columns 
+prev.ari <- matrix(0, nrow=length(med.age), ncol=length(ari1))
+row.names(prev.ari) <- med.age
+colnames(prev.ari) <- ari1
+
+# loop for a single ARI, get a single MSE back 
+for(i in 1:length(ari1)){
+  ari.tmp <- ari1[i]
+  tmp.prev <- calc.prev(ari.tmp)
+  prev.ari[, i] <- tmp.prev
+  mse[i] <- mean((tmp.prev-tupasi.p)^2)
+}
+ 
+# get ARI for the smallest MSE 
+low.mse <- ari1[which.min(mse)] #ARI is 0.037
+low.mse
+```
+
+### Figures  
+
+```{r fig.gen, echo=FALSE}
+# plot the ARIs vs. the MSEs 
+ari.mse <- data.frame(ari1,mse)
+
+ari.mse %>% ggplot(aes(x=ari1,y=mse)) + geom_line() + 
+  labs(x = "ARI",
+       y = "MSE",
+       title = "ARI vs. MSE",
+       caption = "Red line drawn at ARI with lowest MSE (ARI=0.037)") + 
+  geom_vline(xintercept = 0.037, color='red') + 
+  theme(plot.caption = element_text(hjust = 0))
+
+# visualize all predicted prevalences 
+prev.ari.long <- prev.ari %>% as.data.frame() %>%
+                 tibble::rownames_to_column(., "age") %>%
+                 mutate(age=factor(age)) %>% 
+                 reshape2::melt(., id.vars= c("age"), variable.name= "ARI") %>%
+                 dplyr::rename(tmp.prev=value)
+prev.ari.long$age <- factor(prev.ari.long$age, levels=c(0.5, 2.5, 7, 12, 17, 24.5, 34.5, 44.5, 54.5, 64.5, 70))
+
+prev.ari.long %>% ggplot(aes(x=ARI,y=tmp.prev,group=age,color=age)) + geom_line() + 
+  labs(y = 'Prevalence of Infection',
+       title = "Change in Prevalence by ARI") +
+  guides(color = guide_legend(title = 'Median Age', reverse=TRUE)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+# comparison of Tupasi prevalence and prevalence predicted by ARI=0.037 (lowest MSE)
+prev.comp <- data.frame(med.age, tupasi.p) %>% mutate(tmp.prev = calc.prev(0.037))
+prev.comp.long <- prev.comp %>% reshape2::melt(., id.vars=c("med.age")) %>% 
+                  mutate(prev.type = fct_recode(variable, "Tupasi" = "tupasi.p", "Predicted" = "tmp.prev"))
+
+prev.comp.long %>% ggplot(aes(x=med.age,y=value,group=prev.type,color=prev.type)) + geom_line() + 
+  labs(y = 'Prevalence of Infection', 
+       x = 'Median Age',
+       title = 'Tupasi vs. Predicted Prevalences for ARI=0.037',
+       subtitle = '0.037 is the ARI with the lowest MSE') +
+  guides(color = guide_legend(title = 'Prevalence Type')) + 
+  scale_x_continuous(breaks=seq(0,70,10)) + 
+  scale_y_continuous(breaks=seq(0,1,0.1))
+```
+
+## Model {.tabset}
+  
+### Summary     
+OVERVIEW OF PARAMETERS:  
+
+Static Parameters:  
+
+- Probability of progression to disease: 0.025 for new infections, 0.01 for one year infections, 0.005 for two to five year infections and 0.00075 for ‘old’ infections greater than five years old.         
+- Life expectancy at birth: 69.7 years. The life expectancy at birth in the Philippines was 68.77 in 2001 and 70.55 in 2015. The value used in this model is the average of the 2001 and 2015 estimates.    
+- Annual mortality: 0.00563 or 5.63 per 1000 persons. The annual mortality was 5.47 per 1000 in 2001 and 5.797 in 2015. The value used in this model is the average of the 2001 and 2015 estimates.    
+
+Varying parameters (R Shiny widgets):  
+
+-	Starting population size: defaults to one million for simplicity, but can be changed to any value up to 120 million which is the approximate population size of the Philippines in 2024.    
+-	Start and end years: defaults to 2001 and 2016, because our static parameters are grounded within this time period. However, these may be changed to any years from 1990-2030. The duration of the model is also flexible.    
+-	ARI: defaults to 0.037, which is the ARI we found to be closest to Tupasi (see ‘Identifying ARI with lowest MSE with Tupasi’ above). The ARI can be any value between 0.005 and 0.05.     
+-	Starting prevalence of infection: defaults to 0.634 (63.4%) which is the prevalence found by Tupasi. This value can range from 0 to 1.    
+-	Proportion of infections that are old for starting population: defaults to 0.61 (61%) which is the proportion of infections estimated by the expected prevalence at median age of 25 for our default ARI of 0.037 (prevalence = 1-(1-0.037)^25). This value can range from 0 to 1.     
+-	Proportion of those with disease who are treatment cures: default is 0.47 (47%) which was derived from Bob’s estimates. From 2007 to 2016, the average TB disease incidence was 372,000 and average number cured was 175,000 (175000/372000=0.47). This value can range from 0 to 1.    
+-	Rates for death and self-cure from prevalent disease: 6.62% of persons with disease each year in each group. We estimate that after about four years with untreated disease, half of individuals self-cure and half die. Averaging over a four year period, this proportion is calculated by ((1- tx cure rate)/2)/4.   
+
+OVERVIEW OF MODEL GENERATION STEPS:  
+
+Data preparation:  
+
+1. Empty matrix is created with one row per year from start year to end year specified in varying parameters.    
+
+First year of model:   
+
+2. Starting population for the first year of the model is specified (based on parameter selection, and defaults to one million).  
+3. Total infected set to be the population size*starting infection prevalence.  
+4. New infections set to be ARI% of the population  
+5. Of the existing infections (63.4% total infected – 3.7% new infections), 61% of them are old or 6+ year duration. This is the default value based on expected prevalence at the median age (see parameter overview above); however, this value may be changed in R shiny widget.  
+6. The remaining infections needed to reach 63.4% of the population infected are equally distributed across the 1-5 year infection duration groups.  
+7. All individuals without an infection are considered uninfected (other 36.6% of population).  
+8. Infected deaths are calculated via population size* mortality rate* (1-(1-ARI)^age of life expectancy). Using the mortality rate and life expectancy values specified above, infected deaths are population size* 0.00563* (1-(1-0.037)^69.7).  
+9. Uninfected deaths are calculated by subtracting infected deaths from total deaths.  
+10. No one progresses to disease in the first year. All disease generated from the first year’s infections are considered disease cases in year 2.  
+
+For each subsequent year...    
+
+11. The disease treatment cures and those with disease who self-cured (6.62% of prevalent disease) from the previous year are added back into the model as new infections in the current year.  
+12. The infected deaths from the previous year are removed from the current year’s infection groups. This removal is proportional to group size by infection time (i.e. a much higher proportion of deaths are removed from the old infections compared to new or 1-5 year infections).   
+13. The population at risk of infection at the beginning of the year (before replacements) is the sum of all infected and uninfected in the previous year. Therefore, the population at risk should be the population from the previous year excluding those with disease.    
+14. New infections are generated by applying the ARI to uninfected and current infections (1-5 year and 6+ year infections).  
+15. Infections of 1-5 year durations are generated by advancing those infected without a reinfection or disease progression to the next year (e.g. those with a 3-year infection in previous year who were not newly infected or progressed to disease move on to become a 4-year infection).    
+16. Old infections (6+ years) are a sum of old infections in previous year and those who advanced from a 5 year old infection.   
+17. Disease progression is computed per probability of progression to disease conditional on years since infection outlined in static parameters.   
+18. Infected and uninfected deaths are calculated as per steps 8 and 9 above.
+19. Group of everyone with prevalent disease is the sum of incident disease and prevalent disease from previous year, excluding those with treatment cure, death from disease and self-cure (amounts to 39.7% of disease in prior year because 47% are treatment cure, 6.62% die, and 6.62% self-cure).   
+20. Current year’s treatment cures are 47% of all disease calculated in step 19. This proportion may be changed in R shiny widget.   
+21. Death from prevalent disease and self-cures in the current year are each 6.62% of all disease calculated in step 19.   
+22. Uninfected population is uninfected from previous year who were not infected (1-ARI), plus all deaths from previous year (infected deaths, uninfected deaths, deaths from prevalent disease).   
+23. Lastly, total population is sum of infected, uninfected, and those who progress to disease the following year. While the population at risk may decrease as we generate cases of disease (esp in first few years), the total population should remain stable if replacements are balancing individuals being removed and added back into model each year.  
+
+Other summary statistics calculated after model generation…  
+
+- Annual infection incidence: proportion of the population at risk with incident infection  
+- Total number of people infected for each year    
+- Proportion of the population at risk who is infected  
+- Proportion of the population at risk who is uninfected  
+- Percent change in the number of people infected each year  
+- Disease incidence: proportion of the population at risk with incident disease   
+
+### Static Parameters 
+
+##### *Probability of disease progression*   
+```{r echo=FALSE, results='asis', warning=FALSE}
+
+#Probability of progression to disease 
+dis.prob <- c(0.025,0.01,rep(0.005,4),0.00075)
+
+#output table
+inf.type <- c("New infections","1 yr infection","2-5 yr infections","Old (6+ yr) infections")
+prob <- c(0.025,0.01,0.005,0.00075)
+
+dis.prob.table <- data.frame(inf.type, prob)
+
+#create table 
+dis.prob.table %>% kbl(col.names = c("Infection Duration","Probability of progression to disease")) %>% kable_styling()
+```
+
+##### *Life expectancy at birth and annual mortality*     
+```{r}
+#Replacement rate for infected mortality 
+  
+  #life expectancy at birth - Source: https://www.macrotrends.net/global-metrics/countries/PHL/philippines/life-expectancy 
+  #average of 2001 and 2015  
+  x <- c(68.77, 70.55)
+  life.exp = mean(x)
+  
+  #annual mortality per 1000 - Source: https://www.macrotrends.net/global-metrics/countries/PHL/philippines/death-rate 
+  #average of 2001 and 2015
+  y <- c(5.47, 5.797)
+  death.rt = mean(y)/1000
+  
+#output table
+vars <- c("Life expectancy at birth, yrs","Annual mortality")
+values <- c(life.exp,death.rt)
+
+#output table 
+lifeexp.birth.table <- data.frame(vars, values)
+lifeexp.birth.table %>% kbl(col.names = c("","Value")) %>% kable_styling(position = "left")
+
+```
+
+### Varying Parameter Selection
+
+```{r other.param, echo=FALSE, results='asis', warning=FALSE}
+
+#starting population size: default is 1,000,000 
+  #start.pop = 1000000
+  
+  sliderInput("start.pop", 
+              label = "Starting population size:",
+              min = 1000000, 
+              max = 120000000, 
+              value = 1000000, 
+              step = 1000000,
+              round = FALSE)
+
+#start and end years in model:
+  #yr.start = 2001
+  #yr.end = 2016
+
+  selectInput("yr.start", 
+              label = "Start year:",
+              choices = c(seq(1990,2030,1)), 
+              selected = 2001)
+  selectInput("yr.end", 
+              label = "End year:",
+              choices = c(seq(1990,2030,1)), 
+              selected = 2016)
+
+#ARI: apply ari with lowest MSE with Tupasi 
+  #ari = 0.037
+  
+  sliderInput("ari", 
+              label = "ARI (default = ARI with lowest MSE with Tupasi):",
+              min = 0.005, 
+              max = 0.05, 
+              value = 0.037, 
+              step = 0.001,
+              round = -3)
+
+#starting prevalence of infection 
+  #inf.prev <- 0.634
+  
+  sliderInput("inf.prev", 
+              label = "Starting prevalence of infection (default = Tupasi prevalence):",
+              min = 0, 
+              max = 1, 
+              value = 0.634, 
+              step = 0.001,
+              round = -3)
+  
+#proportion of infections that are old for starting population 
+  #this is the proportion of infections estimated by the expected prevalence at median age 
+  #old.inf.prop <- 0.61
+  
+  sliderInput("old.inf.prop", 
+              label = "Proportion of existing infections that are old (default = expected prevalence at median age):",
+              min = 0, 
+              max = 1, 
+              value = 0.61, 
+              step = 0.001,
+              round = -3)
+  
+#proportion of those with disease who are treatment cures 
+  #per Bob's estimates, average TB disease incidence is 372,000 per year and average number cured was 175,000 from 2007 to 2016
+  #avg.tx.cure = 175000/372000 = 0.47 
+  
+  sliderInput("avg.tx.cure", 
+              label = "Proportion of those with disease who are treatment cures (default = average from 2007-2016):",
+              min = 0, 
+              max = 1, 
+              value = 0.470, 
+              step = 0.001,
+              round = -3)
+  
+```
+
+### Model Results 
+
+```{r, context="server", echo=FALSE, results='asis', warning=FALSE}
+
+results1 <- reactive({
+  
+#proportion of all infections that are new in starting population (ARI% of total population at risk)  
+new.inf.prop <- input$ari/input$inf.prev
+
+#Rates for death and self-cure from prevalent disease: 6.62% 
+  dis.death.selfcure.rt <- ((1-input$avg.tx.cure)/2)/4 
+
+#1. empty data frame to store results of model 
+results1 <- data.frame(matrix(0, ncol=24, nrow=length(input$yr.start:input$yr.end))) 
+colnames(results1) <- c('year','pop.at.risk','inf.new','inf.1yr','inf.2yr','inf.3yr','inf.4yr','inf.5yr','inf.old','uninfected','progress2dis','all.disease','tx.cure','prev.dis.death','self.cure','inf.deaths','uninf.deaths','inc','total.inf','prop.inf','prop.uninf','inf.change','total.pop','dis.inc')
+results1$year <- as.integer(seq(input$yr.start,input$yr.end,1))
+
+#2. specify starting population for first year of model 
+results1[1,2] = input$start.pop
+
+##########################
+### LOOP FOR EACH YEAR ###    
+##########################
+
+  for(i in 1:nrow(results1)){
+  
+  #specify starting population & infections for first year 
+  if(i==1){results1[i,19] = results1[i,2]*input$inf.prev #3. total infected is population*starting infection prevalence 
+                             results1[i,3] = results1[i,19]*new.inf.prop #4. new infections, equivalent of ARI*population 
+                             results1[i,9] = (results1[i,19] - results1[i,3])*input$old.inf.prop #5. of existing infections, old.inf.prop proportion are old 
+                             results1[i,4:8] = (results1[i,19] - results1[i,9] - results1[i,3])/5 #6. other infection groups are an equal distribution that add up to 63.4% infected with old/new infections
+                             results1[i,10] = results1[i,2]-sum(results1[i,3:9]) #7. everyone without an infection considered uninfected 
+                             results1[i,16] <- results1[i,2]*death.rt*(1-(1-input$ari)^life.exp) #8. infected deaths 
+                             results1[i,17] <- (results1[i,2]*death.rt) - results1[i,16]} #9. uninfected deaths 
+                             #10. no one progresses to disease in the first year - they will progress to disease the following year 
+    
+  #model subsequent years based on infections/disease progression in previous year 
+  else{
+    
+    #11. disease treatment cures and self-cures from previous year are added back into model as new infections in the current year 
+    results1[i,3] = results1[i-1,13] + results1[i-1,15]
+    
+    #12. subtract infected deaths from previous year from infected population - proportional to prior year's group size 
+    inf.sum = sum(results1[i-1,3:9])
+    results1[i,3] = results1[i,3] - (results1[i-1,3]/inf.sum)*results1[i-1,16]
+    results1[i,4] = results1[i,4] - (results1[i-1,4]/inf.sum)*results1[i-1,16]
+    results1[i,5] = results1[i,5] - (results1[i-1,5]/inf.sum)*results1[i-1,16]
+    results1[i,6] = results1[i,6] - (results1[i-1,6]/inf.sum)*results1[i-1,16]
+    results1[i,7] = results1[i,7] - (results1[i-1,7]/inf.sum)*results1[i-1,16]
+    results1[i,8] = results1[i,8] - (results1[i-1,8]/inf.sum)*results1[i-1,16]
+    results1[i,9] = results1[i,9] - (results1[i-1,9]/inf.sum)*results1[i-1,16]
+    
+    #13. population at risk at beginning of year (before replacements): sum of all infected and uninfected in previous year 
+    results1[i,2] = sum(results1[i-1,3:10]) 
+      
+    #14. new infections: apply ARI to uninfected and current infections 
+    results1[i,3] = results1[i,3] + input$ari*results1[i-1,10] + input$ari*sum(results1[i-1,3:9]*(1-dis.prob)) 
+    
+    #15. infection duration 1-5 years (deducting those who progressed to disease or were reinfected)
+    results1[i,4] = results1[i-1,3]*(1-0.025)*(1-input$ari) 
+    results1[i,5] = results1[i-1,4]*(1-0.01)*(1-input$ari)
+    results1[i,6] = results1[i-1,5]*(1-0.005)*(1-input$ari)
+    results1[i,7] = results1[i-1,6]*(1-0.005)*(1-input$ari)
+    results1[i,8] = results1[i-1,7]*(1-0.005)*(1-input$ari)
+    
+    #16. old infections is sum of old infections in previous year and those who advanced from 5yr old infection 
+    results1[i,9] <- results1[i-1,8]*(1-0.005)*(1-input$ari) + results1[i-1,9]
+    
+    #17. progressed to disease 
+    results1[i,11] = sum(results1[i-1,3:9]*dis.prob) ##people progress to disease the following year 
+    
+    #calculate expected number of infected/uninfected deaths for current year  
+      
+    #18. infected deaths - expected number of deaths*lifetime risk of infection 
+      results1[i,16] <- results1[i,2]*death.rt*(1-(1-input$ari)^life.exp)
+    
+        #uninfected deaths 
+        results1[i,17] <- (results1[i,2]*death.rt) - results1[i,16]
+    
+    #19. all disease group is sum of incident disease and prevalent disease from year before minus the treatment cures, death from disease, and self-cures (39.7% of cases because 47% are tx cure, 6.62% die, 6.62% self-cure)
+      results1[i,12] = results1[i,11] + results1[i-1,12] - sum(results1[i-1,13:15]) 
+    
+    #20. 47% of all disease are treatment cures 
+    results1[i,13] <- results1[i,12]*input$avg.tx.cure
+      
+    #21. death from prevalent disease and self-cures (6.62% each)
+    results1[i,14] <- results1[i,12]*dis.death.selfcure.rt
+    results1[i,15] <- results1[i,12]*dis.death.selfcure.rt
+    
+  #REMAINING UNINFECTED#
+        
+    #22. uninfected: uninfected plus infected/uninfected mortality and death from prevalent disease in previous year
+      results1[i,10] = results1[i-1,10]*(1-input$ari) + results1[i-1,16] + results1[i-1,17] + results1[i-1,14]
+      
+  #TOTAL POPULATION - SHOULD STAY AT 1 MILLION#
+      
+    #23. total population: sum of infected, uninfected, and those who progress to disease the following year (not just those at risk)
+    for(i in 1:nrow(results1)){
+      if(i==1){results1[i,23]=sum(results1[i,3:10])}
+      else{results1[i,23] = sum(results1[i,3:10]) + results1[i+1,11]}}
+    
+  }}  
+
+#annual incidence -> number of new infections over population 
+results1$inc <- results1$inf.new/results1$pop.at.risk
+
+#column with total number of people infected for each year 
+results1$total.inf <- rowSums(results1[,3:9])
+
+#proportion of population at risk infected  
+results1$prop.inf <- results1$total.inf/results1$pop.at.risk
+
+#proportion of population at risk uninfected
+results1$prop.uninf <- results1$uninfected/results1$pop.at.risk
+
+#percent change in number of people infected each year 
+for(i in 1:nrow(results1)){
+          if(i==1){results1[i,22]=NA}
+          else{results1[i,22] = ((results1[i,19] - results1[i-1,19])/results1[i-1,19])*100}}
+
+##calculate disease incidence
+results1$dis.inc <- results1$progress2dis/results1$pop.at.risk
+
+#remove decimals for columns with number of people 
+results1 <- results1 %>% mutate_at(c(1:17,23), round, 0)
+                      
+})
+
+```
+
+```{r}
+#display table with model results 
+htmlOutput("results1.table")
+```
+
+```{r context="server", echo=FALSE, results='asis', warning=FALSE}
+output$results1.table <- renderText({
+  results1() %>% kbl(col.names = c("Year (1)","Population at risk (2)","New infections (3)","1yr old infections (4)","2yr old infections (5)", "3yr old infections (6)", "4yr old infections (7)", "5yr old infections (8)", "Old infections (6+ yrs) (9)", "Uninfected (10)", "Progressed to disease (11)", "All disease (12)", "Treatment cures (13)", "Death from prevalent disease (14)", "Self-cure (15)", "Expected infected deaths (16)", "Expected uninfected deaths (17)", "Infection incidence (18)", "Total infected (19)", "Proportion infected (20)", "Proportion uninfected (21)", "Percent change in infections (22)", "Total population (23)", "Disease incidence (24)")) %>% kable_styling()
+})
+```
+
+## Figures {.tabset}
+
+### Overall change in population at risk  
+```{r}
+plotOutput("popchange")
+```
+
+```{r context="server", include=FALSE, echo=FALSE, warning=FALSE, results='asis'}
+#change in population for each year
+
+output$popchange <- renderPlot({ results1() %>%
+  ggplot(aes(x=as.numeric(year), y=pop.at.risk)) + geom_line() + #scale_x_continuous(breaks=seq(from=min(year), to=max(year), by=1)) +
+          labs(x="Year", y="Population At Risk") + 
+          theme(axis.text.x = element_text(angle = 45, hjust=1, size=14), axis.text.y = element_text(size=14),
+                axis.title = element_text(size=16), legend.text = element_text(size=14))
+})
+
+```
+
+### Infection incidence  
+```{r}
+plotOutput("infectionincidence")
+```
+
+```{r context="server", include=FALSE, echo=FALSE, warning=FALSE, results='asis'}
+#change in infection incidence for each year 
+
+output$infectionincidence <- renderPlot({ results1() %>%
+  ggplot(aes(x=year, y=inc)) + geom_line() +
+               labs(x="Year", y="Infection Incidence") + #scale_x_continuous(breaks=unique(year)) + 
+               theme(axis.text.x = element_text(angle = 45, hjust=1, size=14), axis.text.y = element_text(size=14),
+                axis.title = element_text(size=16), legend.text = element_text(size=14)) + 
+               labs(caption = "Incidence = # new infections / total population")
+})
+```
+
+### Disease incidence  
+```{r}
+plotOutput("diseaseincidence")
+```
+
+```{r context="server", include=FALSE}
+#change in disease incidence for each year 
+
+output$diseaseincidence <- renderPlot({ results1() %>%
+ggplot(aes(x=year, y=dis.inc)) + geom_line() +
+               labs(x="Year", y="Disease Incidence") + #scale_x_continuous(breaks=2001:2016) + 
+               theme(axis.text.x = element_text(angle = 45, hjust=1, size=14), axis.text.y = element_text(size=14),
+                axis.title = element_text(size=16), legend.text = element_text(size=14)) + 
+               labs(caption = "Incidence = # progressed to disease / total population")
+})
+```
+
+### Proportion uninfected vs. infected each year  
+```{r}
+plotOutput("propinfected")
+```
+
+```{r context="server", include=FALSE, echo=FALSE, warning=FALSE, results='asis', message=FALSE}
+#plot stacked barplot 
+
+output$propinfected <- renderPlot({
+
+inf.props <- results1() %>% reshape2::melt(., id.vars=c("year"), variable.name="var") %>% dplyr::filter(var %in% c("prop.inf","prop.uninf"))
+
+ggplot(inf.props, aes(fill=fct_rev(var), y=value, x=year)) + 
+    geom_bar(position="stack", stat="identity") + labs(x="Year", y="Population Proportion") + 
+    scale_fill_discrete(name = " ", labels = c("Uninfected","Infected")) + theme(axis.text = element_text(size=14), axis.title = element_text(size=16), legend.text = element_text(size=14))  
+
+})
+  
+```
+
+### Prevalent disease 
+```{r}
+plotOutput("prevdisease")
+```
+
+```{r context="server", include=FALSE, echo=FALSE, warning=FALSE, results='asis', message=FALSE}
+#change in those who progress to disease, treatment cures, prevalent disease, death from prevalent disease and self-cures for each year 
+
+output$prevdisease <- renderPlot({
+  
+long <- results1() %>% reshape2::melt(., id.vars=c("year"), variable.name="var")
+
+dis <- long %>% filter(var %in% c("progress2dis","tx.cure","prev.disease","prev.dis.death","self.cure")) 
+dis2 <- results1() %>% dplyr::select(year,pop.at.risk) 
+dis3 <- merge(dis, dis2, by='year')
+
+dis3 <- dis3 %>% mutate(var = fct_recode(var, "Progress to disease" = "progress2dis",
+                                              "Treatment cure" = "tx.cure",
+                                              "Prevalent disease" = "prev.disease",
+                                              "Death from prevalent disease" = "prev.dis.death",
+                                              "Self-cure" = "self.cure"))
+dis3 <- dis3 %>% mutate(prop = value/pop.at.risk)
+dis3 %>% ggplot(aes(x=year, y=prop, group=var, color=var)) + geom_line() +
+               labs(x="Year", y="Population Proportion") + 
+               #scale_x_continuous(breaks=2001:2016) + 
+               theme(axis.text.x = element_text(angle = 45, hjust=1, size=14), axis.text.y = element_text(size=14),
+                axis.title = element_text(size=16), legend.text = element_text(size=14), plot.caption = element_text(size=12)) + 
+               guides(color = guide_legend(title = '')) +
+               labs(caption = "Prevalent Disease = # progressed to disease who are not treatment cures, have not died and have not self-cured\n
+                              *Death from prevalent disease and self-cure lines overlap because they are the same")
+
+})
+```
+
+
+```{r context="server", include=FALSE, echo=FALSE, results='asis', warning=FALSE}
+### DATA QUALITY CHECKS - to add after population is stable ### 
+
+#population at risk is sum of infected and infected 
+
+#population at risk is total population minus those with disease 
+
+#total population is sum of infected, uninfected and those with disease 
+
+#new infections are ARI% of population at risk 
+
+#sum of expected and unexpected deaths should add up to death rate % of population 
+```
+
+
